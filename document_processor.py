@@ -5,6 +5,7 @@ Extracts text from PDF and DOCX files for translation.
 """
 
 import os
+import sys
 from typing import Optional
 
 
@@ -213,11 +214,20 @@ def extract_text(file_path: str, file_type: Optional[str] = None) -> dict:
 # ... (existing imports)
 from translator import translate_text
 
-def translate_docx_file(file_path: str, output_path: str, source_lang: str, target_lang: str) -> dict:
+def translate_paragraph_runs(para, source_lang: str, target_lang: str) -> int:
     """
-    Translate a DOCX file preserving formatting.
+    Translate paragraph by translating each run individually to preserve formatting.
+    Returns count of translated runs.
     """
-import sys
+    translated_count = 0
+    for run in para.runs:
+        if run.text and run.text.strip():
+            result = translate_text(run.text, source_lang, target_lang)
+            if result["success"]:
+                # Preserve the run's text while keeping all formatting (bold, italic, font, etc.)
+                run.text = result["translated_text"]
+                translated_count += 1
+    return translated_count
 
 def translate_docx_file(file_path: str, output_path: str, source_lang: str, target_lang: str) -> dict:
     """
@@ -235,29 +245,38 @@ def translate_docx_file(file_path: str, output_path: str, source_lang: str, targ
         
         translated_count = 0
         
-        # Translate paragraphs
+        # Translate paragraphs - use run-level translation to preserve formatting
         for i, para in enumerate(doc.paragraphs):
             if para.text.strip():
-                original_text = para.text
-                result = translate_text(original_text, source_lang, target_lang)
-                if result["success"]:
-                    translated_text = result["translated_text"]
-                    para.text = translated_text
-                    translated_count += 1
-                else:
-                    print(f"DEBUG: Translation failed for para {i}: {result.get('error')}", file=sys.stderr)
+                # Translate each run individually to preserve bold, italic, fonts, etc.
+                runs_translated = translate_paragraph_runs(para, source_lang, target_lang)
+                if runs_translated > 0:
+                    translated_count += runs_translated
+                elif para.text.strip():
+                    # Fallback: If no runs but text exists, translate whole paragraph
+                    result = translate_text(para.text, source_lang, target_lang)
+                    if result["success"]:
+                        para.text = result["translated_text"]
+                        translated_count += 1
+                    else:
+                        print(f"DEBUG: Translation failed for para {i}: {result.get('error')}", file=sys.stderr)
 
-        # Translate tables
+        # Translate tables - use run-level translation to preserve formatting
         for t_idx, table in enumerate(doc.tables):
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         if para.text.strip():
-                            original_text = para.text
-                            result = translate_text(original_text, source_lang, target_lang)
-                            if result["success"]:
-                                para.text = result["translated_text"]
-                                translated_count += 1
+                            # Translate each run individually to preserve formatting
+                            runs_translated = translate_paragraph_runs(para, source_lang, target_lang)
+                            if runs_translated > 0:
+                                translated_count += runs_translated
+                            elif para.text.strip():
+                                # Fallback for paragraphs without runs
+                                result = translate_text(para.text, source_lang, target_lang)
+                                if result["success"]:
+                                    para.text = result["translated_text"]
+                                    translated_count += 1
         
         print(f"DEBUG: Total translated segments: {translated_count}", file=sys.stderr)
         

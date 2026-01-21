@@ -217,9 +217,6 @@ def explain_text(
     return generate_ai_response(prompt, system_message=system_message, **kwargs)
 
 
-    return generate_ai_response(prompt, system_message=system_message, **kwargs)
-
-
 def extract_text_from_image(image_bytes: bytes, mime_type: str = "image/png") -> dict:
     """
     Extract text from an image using Azure OpenAI Vision (OCR).
