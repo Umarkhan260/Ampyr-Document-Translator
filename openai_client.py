@@ -217,6 +217,70 @@ def explain_text(
     return generate_ai_response(prompt, system_message=system_message, **kwargs)
 
 
+    return generate_ai_response(prompt, system_message=system_message, **kwargs)
+
+
+def extract_text_from_image(image_bytes: bytes, mime_type: str = "image/png") -> dict:
+    """
+    Extract text from an image using Azure OpenAI Vision (OCR).
+    
+    Args:
+        image_bytes: Raw image data
+        mime_type: Image MIME type (default image/png)
+        
+    Returns:
+        dict with extracted text
+    """
+    try:
+        import base64
+        
+        # Encode image
+        b64_img = base64.b64encode(image_bytes).decode('utf-8')
+        data_url = f"data:{mime_type};base64,{b64_img}"
+        
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-mini")
+        
+        if not api_key or not endpoint:
+            return {"success": False, "error": "Missing OpenAI credentials"}
+            
+        client = get_openai_client(api_key, endpoint)
+        
+        messages = [
+            {
+                "role": "system", 
+                "content": "You are an expert OCR engine. Extract ALL text from the image exactly as it appears. Preserve layout structure where possible using newlines. Do not add markdown formatting or comments. Output ONLY the extracted text."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract all text from this document image:"},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]
+            }
+        ]
+        
+        response = client.chat.completions.create(
+            model=deployment_name,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=2000
+        )
+        
+        text = response.choices[0].message.content
+        return {
+            "success": True,
+            "text": text,
+            "usage": {
+                "total_tokens": response.usage.total_tokens
+            }
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": f"OCR failed: {str(e)}"}
+
+
 # Quick test when run directly
 if __name__ == "__main__":
     print("Testing Azure OpenAI...")

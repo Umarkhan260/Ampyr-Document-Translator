@@ -11,7 +11,7 @@ Endpoints:
 import os
 import sys
 import tempfile
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -26,7 +26,7 @@ load_dotenv()
 # Import our modules
 from translator import translate_text, get_supported_languages
 from openai_client import generate_ai_response, summarize_text
-from document_processor import extract_text
+from document_processor import extract_text, translate_document_file
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -37,17 +37,14 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'txt'}
 
-
 def allowed_file(filename):
     """Check if file extension is allowed."""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 
 @app.route('/')
 def index():
     """Serve the frontend UI."""
     return render_template('index.html')
-
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -57,7 +54,6 @@ def health_check():
         "service": "Azure AI Document Translation API",
         "version": "1.0.0"
     })
-
 
 @app.route('/languages', methods=['GET'])
 def list_languages():
@@ -81,19 +77,10 @@ def list_languages():
             "error": result["error"]
         }), 500
 
-
 @app.route('/translate', methods=['POST'])
 def translate_endpoint():
     """
     Translate plain text.
-    
-    Request JSON:
-    {
-        "text": "Hello, world!",
-        "source_lang": "en",
-        "target_lang": "hi",
-        "summarize": false  // optional
-    }
     """
     data = request.get_json()
     
@@ -146,8 +133,88 @@ def translate_endpoint():
         }), 500
 
 
+@app.route('/download/<filename>')
+def download_file(filename):
+    """Serve the translated file."""
+    try:
+        filename = secure_filename(filename)
+        path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if os.path.exists(path):
+            return send_file(
+                path,
+                as_attachment=True,
+                download_name=filename.replace('translated_', '').replace(filename[:9], ''), # Try to clean up name roughly
+                mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            )
+        else:
+            return "File not found or expired.", 404
+    except Exception as e:
+        return str(e), 500
+
+@app.route('/upload-document', methods=['POST'])
+def upload_and_preserve():
+    """
+    Upload a document, translate it, and return preview + download link.
+    """
+    if 'file' not in request.files:
+        return jsonify({"success": False, "error": "No file provided"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"success": False, "error": "No file selected"}), 400
+        
+    if not allowed_file(file.filename):
+        return jsonify({"success": False, "error": "File type not allowed"}), 400
+
+    target_lang = request.form.get('target_lang', 'nl')
+    source_lang = request.form.get('source_lang', 'en')
+    
+    filename = secure_filename(file.filename)
+    import uuid
+    unique_id = str(uuid.uuid4())[:8]
+    temp_input = os.path.join(app.config['UPLOAD_FOLDER'], f"in_{unique_id}_{filename}")
+    output_filename = f"translated_{unique_id}_{os.path.splitext(filename)[0]}.docx"
+    temp_output = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
+    
+    try:
+        file.save(temp_input)
+        
+        # Translate
+        result = translate_document_file(temp_input, temp_output, source_lang, target_lang)
+        
+        if result["success"]:
+            # Extract preview text from the output DOCX
+            preview_text = "Preview not available."
+            try:
+                extraction = extract_text(result["output_path"])
+                if extraction["success"]:
+                    preview_text = extraction["text"][:1000] + "..." if len(extraction["text"]) > 1000 else extraction["text"]
+            except:
+                pass
+
+            return jsonify({
+                "success": True, 
+                "message": "Translation complete",
+                "preview_text": preview_text,
+                "download_url": f"/download/{output_filename}",
+                "original_filename": filename
+            })
+        else:
+            return jsonify({"success": False, "error": result["error"]}), 500
+            
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+        
+    finally:
+        if os.path.exists(temp_input):
+            os.remove(temp_input)
+
 @app.route('/upload', methods=['POST'])
 def upload_and_translate():
+    """
+    Upload a document and translate its content (Text Only).
+    """
+    # ... (existing code)
     """
     Upload a document and translate its content.
     

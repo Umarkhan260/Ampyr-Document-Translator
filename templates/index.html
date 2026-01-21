@@ -591,6 +591,7 @@
                             <option value="es">Spanish</option>
                             <option value="fr">French</option>
                             <option value="de">German</option>
+                            <option value="nl">Dutch</option>
                             <option value="zh">Chinese</option>
                             <option value="ar">Arabic</option>
                             <option value="ja">Japanese</option>
@@ -608,6 +609,7 @@
                             <option value="es">Spanish</option>
                             <option value="fr">French</option>
                             <option value="de">German</option>
+                            <option value="nl">Dutch</option>
                             <option value="zh">Chinese</option>
                             <option value="ar">Arabic</option>
                             <option value="ja">Japanese</option>
@@ -624,6 +626,16 @@
                         <strong>Summarize before translating</strong>
                         <div style="font-size: 0.85rem; color: var(--text-secondary);">
                             Use Azure OpenAI to create a concise summary first
+                        </div>
+                    </div>
+                </label>
+
+                <label class="checkbox-group" style="margin-top: 1rem;">
+                    <input type="checkbox" id="preserveCheck" checked>
+                    <div>
+                        <strong>Preserve File Format (Download)</strong>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary);">
+                            Returns a translated DOCX file with original layout (Best for PDF/DOCX)
                         </div>
                     </div>
                 </label>
@@ -657,6 +669,7 @@
                             <option value="es">Spanish</option>
                             <option value="fr">French</option>
                             <option value="de">German</option>
+                            <option value="nl">Dutch</option>
                         </select>
                     </div>
 
@@ -668,6 +681,7 @@
                             <option value="es">Spanish</option>
                             <option value="fr">French</option>
                             <option value="de">German</option>
+                            <option value="nl">Dutch</option>
                         </select>
                     </div>
                 </div>
@@ -711,6 +725,7 @@
             </div>
 
             <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+                <a id="downloadBtn" class="btn btn-primary hidden" href="#" target="_blank">⬇️ Download Document</a>
                 <button class="btn btn-secondary" onclick="copyResult()">📋 Copy</button>
                 <button class="btn btn-secondary" onclick="clearResult()">🔄 New Translation</button>
             </div>
@@ -812,13 +827,22 @@
             const formData = new FormData();
             formData.append('file', selectedFile);
             formData.append('source_lang', document.getElementById('sourceLang').value);
-            formData.append('target_lang', document.getElementById('targetLang').value);
+            const targetLang = document.getElementById('targetLang').value;
+            formData.append('target_lang', targetLang);
+
+            const preserveFormat = document.getElementById('preserveCheck').checked;
+
+            // If preserving format, we don't summarize (feature limitation for now)
+            // But we can still pass the param if backend supports it (currently backend ignores summarize for preservation)
             formData.append('summarize', document.getElementById('summarizeCheck').checked ? 'true' : 'false');
 
-            showLoading('Extracting text and translating...');
+            const endpoint = preserveFormat ? '/upload-document' : '/upload';
+            const loadingText = preserveFormat ? 'Translating and generating document...' : 'Extracting text and translating...';
+
+            showLoading(loadingText);
 
             try {
-                const response = await fetch(`${API_BASE}/upload`, {
+                const response = await fetch(`${API_BASE}${endpoint}`, {
                     method: 'POST',
                     body: formData
                 });
@@ -827,11 +851,34 @@
                 hideLoading();
 
                 if (data.success) {
-                    showResult(data);
+                    if (preserveFormat) {
+                        // Preview Mode
+                        showResult({
+                            success: true,
+                            translated_text: data.preview_text,
+                            target_lang: targetLang,
+                            summary: null
+                        });
+
+                        // Setup Download Button
+                        const dlBtn = document.getElementById('downloadBtn');
+                        dlBtn.href = `${API_BASE}${data.download_url}`;
+                        dlBtn.classList.remove('hidden');
+                        dlBtn.innerHTML = `⬇️ Download Translated Document`;
+
+                        document.getElementById('translatedLabel').innerText = "🌐 Translated Preview (First 1000 chars)";
+                    } else {
+                        // Standard Mode
+                        showResult(data);
+                        document.getElementById('downloadBtn').classList.add('hidden');
+                        document.getElementById('translatedLabel').innerText = "🌐 Translated Text";
+                    }
                 } else {
                     showError(data.error || 'Translation failed.');
                 }
+
             } catch (error) {
+                console.error(error);
                 hideLoading();
                 showError('Connection failed. Make sure the API server is running.');
             }
