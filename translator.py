@@ -72,12 +72,15 @@ def translate_text(
     api_version = "3.0"
     url = f"{endpoint.rstrip('/')}{path}"
     
-    # Query parameters
+    # Query parameters - omit 'from' to enable auto-detection
     params = {
         "api-version": api_version,
-        "from": source_lang,
         "to": target_lang
     }
+    
+    # Only include source language if explicitly specified (not auto-detect)
+    if source_lang and source_lang.lower() not in ['auto', 'auto-detect', '']:
+        params["from"] = source_lang
     
     # Request headers
     headers = {
@@ -148,6 +151,92 @@ def translate_text(
             "source_language": source_lang,
             "target_language": target_lang
         }
+
+
+def translate_long_text(
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    chunk_size: int = 5000
+) -> dict:
+    """
+    Translate long text by splitting into chunks.
+    Azure Translator has a ~10,000 character limit per request.
+    
+    Args:
+        text: The long text to translate
+        source_lang: Source language code (use 'auto' for auto-detection)
+        target_lang: Target language code
+        chunk_size: Maximum characters per chunk (default 5000 for safety)
+    
+    Returns:
+        dict with translated text or error
+    """
+    if not text or not text.strip():
+        return {
+            "success": False,
+            "error": "No text provided",
+            "translated_text": None
+        }
+    
+    # If text is short enough, translate directly
+    if len(text) <= chunk_size:
+        return translate_text(text, source_lang, target_lang)
+    
+    # Split text into chunks at paragraph boundaries
+    paragraphs = text.split('\n')
+    chunks = []
+    current_chunk = ""
+    
+    for para in paragraphs:
+        # If adding this paragraph would exceed chunk size, save current chunk
+        if len(current_chunk) + len(para) + 1 > chunk_size and current_chunk:
+            chunks.append(current_chunk.strip())
+            current_chunk = para + "\n"
+        else:
+            current_chunk += para + "\n"
+    
+    # Don't forget the last chunk
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    print(f"DEBUG: Translating {len(chunks)} chunks for long document...", file=__import__('sys').stderr)
+    
+    # Translate each chunk
+    translated_chunks = []
+    detected_lang = None
+    
+    for i, chunk in enumerate(chunks):
+        print(f"DEBUG: Translating chunk {i+1}/{len(chunks)} ({len(chunk)} chars)...", file=__import__('sys').stderr)
+        result = translate_text(chunk, source_lang, target_lang)
+        
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": f"Failed at chunk {i+1}: {result['error']}",
+                "translated_text": None,
+                "chunks_completed": i
+            }
+        
+        translated_chunks.append(result["translated_text"])
+        
+        # Capture detected language from first chunk
+        if i == 0 and result.get("detected_language"):
+            detected_lang = result["detected_language"]
+    
+    # Combine all translated chunks
+    full_translation = "\n".join(translated_chunks)
+    
+    return {
+        "success": True,
+        "original_text": text[:500] + "..." if len(text) > 500 else text,
+        "translated_text": full_translation,
+        "source_language": source_lang,
+        "target_language": target_lang,
+        "detected_language": detected_lang,
+        "chunks_translated": len(chunks),
+        "error": None
+    }
 
 
 def get_supported_languages() -> dict:

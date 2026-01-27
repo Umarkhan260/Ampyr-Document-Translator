@@ -24,7 +24,7 @@ if sys.platform == "win32":
 load_dotenv()
 
 # Import our modules
-from translator import translate_text, get_supported_languages
+from translator import translate_text, translate_long_text, get_supported_languages
 from openai_client import generate_ai_response, summarize_text
 from document_processor import extract_text, translate_document_file
 
@@ -156,6 +156,8 @@ def upload_and_preserve():
     """
     Upload a document, translate it, and return preview + download link.
     """
+    print("DEBUG: /upload-document endpoint called", file=sys.stderr)
+    
     if 'file' not in request.files:
         return jsonify({"success": False, "error": "No file provided"}), 400
     
@@ -167,7 +169,9 @@ def upload_and_preserve():
         return jsonify({"success": False, "error": "File type not allowed"}), 400
 
     target_lang = request.form.get('target_lang', 'nl')
-    source_lang = request.form.get('source_lang', 'en')
+    source_lang = request.form.get('source_lang', 'auto')  # Auto-detect by default
+    
+    print(f"DEBUG: File: {file.filename}, Source: {source_lang}, Target: {target_lang}", file=sys.stderr)
     
     filename = secure_filename(file.filename)
     import uuid
@@ -178,9 +182,12 @@ def upload_and_preserve():
     
     try:
         file.save(temp_input)
+        print(f"DEBUG: Saved input file to: {temp_input}", file=sys.stderr)
         
         # Translate
+        print(f"DEBUG: Starting translation...", file=sys.stderr)
         result = translate_document_file(temp_input, temp_output, source_lang, target_lang)
+        print(f"DEBUG: Translation result: success={result.get('success')}, translated_count={result.get('translated_count', 'N/A')}", file=sys.stderr)
         
         if result["success"]:
             # Extract preview text from the output DOCX
@@ -197,12 +204,15 @@ def upload_and_preserve():
                 "message": "Translation complete",
                 "preview_text": preview_text,
                 "download_url": f"/download/{output_filename}",
-                "original_filename": filename
+                "original_filename": filename,
+                "translated_count": result.get("translated_count", 0)
             })
         else:
+            print(f"DEBUG: Translation failed: {result.get('error')}", file=sys.stderr)
             return jsonify({"success": False, "error": result["error"]}), 500
             
     except Exception as e:
+        print(f"DEBUG: Exception: {str(e)}", file=sys.stderr)
         return jsonify({"success": False, "error": str(e)}), 500
         
     finally:
@@ -241,7 +251,7 @@ def upload_and_translate():
     
     # Get parameters
     target_lang = request.form.get('target_lang', 'hi')
-    source_lang = request.form.get('source_lang', 'en')
+    source_lang = request.form.get('source_lang', 'auto')  # Auto-detect by default
     should_summarize = request.form.get('summarize', 'false').lower() == 'true'
     
     # Save file temporarily
@@ -298,21 +308,16 @@ def upload_and_translate():
                     "success": False,
                     "error": f"Summarization failed: {summary_result['error']}"
                 }), 500
-        else:
-            # For translation without summary, limit text length
-            max_chars = 10000
-            if len(text_to_translate) > max_chars:
-                text_to_translate = text_to_translate[:max_chars]
-                response_data["text_truncated"] = True
         
-        # Translate
-        result = translate_text(text_to_translate, source_lang, target_lang)
+        # Translate using chunked translation for large documents
+        result = translate_long_text(text_to_translate, source_lang, target_lang)
         
         if result["success"]:
             response_data.update({
                 "success": True,
                 "original_text": text_to_translate[:500] + "..." if len(text_to_translate) > 500 else text_to_translate,
-                "translated_text": result["translated_text"]
+                "translated_text": result["translated_text"],
+                "chunks_translated": result.get("chunks_translated", 1)
             })
             return jsonify(response_data)
         else:

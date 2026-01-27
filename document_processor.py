@@ -212,7 +212,7 @@ def extract_text(file_path: str, file_type: Optional[str] = None) -> dict:
 
 
 # ... (existing imports)
-from translator import translate_text
+from translator import translate_text, translate_long_text
 
 def translate_paragraph_runs(para, source_lang: str, target_lang: str) -> int:
     """
@@ -220,13 +220,22 @@ def translate_paragraph_runs(para, source_lang: str, target_lang: str) -> int:
     Returns count of translated runs.
     """
     translated_count = 0
-    for run in para.runs:
-        if run.text and run.text.strip():
-            result = translate_text(run.text, source_lang, target_lang)
-            if result["success"]:
-                # Preserve the run's text while keeping all formatting (bold, italic, font, etc.)
-                run.text = result["translated_text"]
-                translated_count += 1
+    runs_with_text = [r for r in para.runs if r.text and r.text.strip()]
+    
+    if not runs_with_text:
+        # No runs with text - paragraph might have text but no runs (common in converted PDFs)
+        return 0
+    
+    for run in runs_with_text:
+        # Use translate_long_text for potentially large runs
+        result = translate_long_text(run.text, source_lang, target_lang)
+        if result["success"]:
+            # Preserve the run's text while keeping all formatting (bold, italic, font, etc.)
+            run.text = result["translated_text"]
+            translated_count += 1
+        else:
+            print(f"DEBUG: Run translation failed: {result.get('error')}", file=sys.stderr)
+    
     return translated_count
 
 def translate_docx_file(file_path: str, output_path: str, source_lang: str, target_lang: str) -> dict:
@@ -252,9 +261,11 @@ def translate_docx_file(file_path: str, output_path: str, source_lang: str, targ
                 runs_translated = translate_paragraph_runs(para, source_lang, target_lang)
                 if runs_translated > 0:
                     translated_count += runs_translated
+                    print(f"DEBUG: Para {i} - translated {runs_translated} runs", file=sys.stderr)
                 elif para.text.strip():
                     # Fallback: If no runs but text exists, translate whole paragraph
-                    result = translate_text(para.text, source_lang, target_lang)
+                    print(f"DEBUG: Para {i} - no runs, using paragraph-level translation ({len(para.text)} chars)", file=sys.stderr)
+                    result = translate_long_text(para.text, source_lang, target_lang)
                     if result["success"]:
                         para.text = result["translated_text"]
                         translated_count += 1
@@ -273,7 +284,7 @@ def translate_docx_file(file_path: str, output_path: str, source_lang: str, targ
                                 translated_count += runs_translated
                             elif para.text.strip():
                                 # Fallback for paragraphs without runs
-                                result = translate_text(para.text, source_lang, target_lang)
+                                result = translate_long_text(para.text, source_lang, target_lang)
                                 if result["success"]:
                                     para.text = result["translated_text"]
                                     translated_count += 1
@@ -304,26 +315,112 @@ def translate_docx_file(file_path: str, output_path: str, source_lang: str, targ
 
 def create_simple_translated_docx(text: str, output_path: str, source_lang: str, target_lang: str) -> dict:
     """
-    Create a new DOCX with translated text (fallback method).
+    Create a professional-looking DOCX with translated text.
+    Includes heading detection, bold term preservation, and proper styling.
     """
     try:
         from docx import Document
+        from docx.shared import Pt, Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.enum.style import WD_STYLE_TYPE
+        import re
+        
         doc = Document()
-        doc.add_heading('Translated Document (Fallback Layout)', 0)
+        
+        # Set up document margins
+        for section in doc.sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1.25)
+            section.right_margin = Inches(1.25)
+        
+        # Clean up page markers like "--- Page 1 ---"
+        text = re.sub(r'---\s*Page\s*\d+\s*---\n*', '', text)
         
         # Split by double newlines to paragraphs
         paragraphs = text.split('\n\n')
         
-        for para in paragraphs:
-            if para.strip():
-                result = translate_text(para, source_lang, target_lang)
-                if result["success"]:
-                    doc.add_paragraph(result["translated_text"])
-                else:
-                    doc.add_paragraph(para) # Keep original if failed
+        print(f"DEBUG: Creating professional DOCX - {len(paragraphs)} sections", file=sys.stderr)
+        
+        translated_count = 0
+        
+        for i, para in enumerate(paragraphs):
+            para = para.strip()
+            if not para:
+                continue
+            
+            # Translate the paragraph
+            result = translate_long_text(para, source_lang, target_lang)
+            if result["success"]:
+                translated_text = result["translated_text"]
+                translated_count += 1
+            else:
+                print(f"DEBUG: Para {i} translation failed: {result.get('error')}", file=sys.stderr)
+                translated_text = para  # Keep original if failed
+            
+            # Detect if this is a heading (short text, likely a title)
+            is_heading = (
+                len(translated_text) < 100 and 
+                '\n' not in translated_text and
+                not translated_text.endswith('.') and
+                not translated_text.endswith(',')
+            )
+            
+            # Detect centered/special text (often short lines with dashes or special markers)
+            is_centered = (
+                translated_text.startswith('-') and translated_text.endswith('-') or
+                translated_text.startswith('—') and translated_text.endswith('—') or
+                'hereinafter' in translated_text.lower() or
+                'referred to as' in translated_text.lower() or
+                'nachstehend' in para.lower()  # German "hereinafter"
+            )
+            
+            if is_heading:
+                # Add as heading
+                heading = doc.add_heading(translated_text, level=2)
+                heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            elif is_centered:
+                # Add as centered paragraph
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run(translated_text)
+                run.italic = True
+            else:
+                # Regular paragraph - detect and bold quoted terms
+                p = doc.add_paragraph()
+                
+                # Find terms in quotes like "PVA" or "Solar Park" and make them bold
+                pattern = r'[""„]([^""„"]+)["""]'
+                last_end = 0
+                
+                for match in re.finditer(pattern, translated_text):
+                    # Add text before the match
+                    if match.start() > last_end:
+                        p.add_run(translated_text[last_end:match.start()])
                     
+                    # Add the quoted term with quotes and bold
+                    quoted_run = p.add_run(f'"{match.group(1)}"')
+                    quoted_run.bold = True
+                    
+                    last_end = match.end()
+                
+                # Add remaining text
+                if last_end < len(translated_text):
+                    p.add_run(translated_text[last_end:])
+                
+                # If no quoted terms were found, the paragraph might be empty
+                if last_end == 0:
+                    p.add_run(translated_text)
+            
+            # Add some spacing between paragraphs
+            if not is_heading:
+                p = doc.paragraphs[-1]
+                p.paragraph_format.space_after = Pt(8)
+        
         doc.save(output_path)
-        return {"success": True, "output_path": output_path}
+        print(f"DEBUG: Professional DOCX created with {translated_count} translated sections", file=sys.stderr)
+        
+        return {"success": True, "output_path": output_path, "translated_count": translated_count}
     except Exception as e:
         return {"success": False, "error": f"Fallback creation failed: {str(e)}"}
 
@@ -346,6 +443,7 @@ def translate_document_file(file_path: str, output_path: str, source_lang: str, 
     """
     Translate document preserving format (converts PDF to DOCX).
     """
+    print(f"DEBUG: translate_document_file called with {file_path}", file=sys.stderr)
     _, ext = os.path.splitext(file_path)
     ext = ext.lower()
     
@@ -353,35 +451,36 @@ def translate_document_file(file_path: str, output_path: str, source_lang: str, 
         return translate_docx_file(file_path, output_path, source_lang, target_lang)
     
     elif ext == '.pdf':
-        # First convert to DOCX
-        temp_docx = file_path + ".temp.docx"
-        conversion = convert_pdf_to_docx(file_path, temp_docx)
+        # For PDFs: Extract text directly and create translated DOCX
+        # This is more reliable than pdf2docx conversion
+        print(f"DEBUG: Processing PDF file...", file=sys.stderr)
         
-        if not conversion["success"]:
-            return conversion
-            
-        # Then translate the DOCX
         if not output_path.endswith('.docx'):
             output_path += '.docx'
-            
-        result = translate_docx_file(temp_docx, output_path, source_lang, target_lang)
         
-        # Check if we successfully translated anything
-        if result["success"] and result.get("translated_count", 0) == 0:
-            print(f"WARNING: No content translated from converted DOCX. Using fallback extraction.", file=sys.stderr)
-            # Fallback: Extract text using pdfplumber and create simple DOCX
-            extraction = extract_text_from_pdf(file_path)
-            if extraction["success"] and extraction["text"]:
-                fallback_result = create_simple_translated_docx(extraction["text"], output_path, source_lang, target_lang)
-                # Cleanup temp
-                if os.path.exists(temp_docx):
-                    os.remove(temp_docx)
-                return fallback_result
+        # Step 1: Extract text from PDF using pdfplumber
+        extraction = extract_text_from_pdf(file_path)
         
-        # Cleanup temp
-        if os.path.exists(temp_docx):
-            os.remove(temp_docx)
-            
+        if not extraction["success"]:
+            print(f"DEBUG: PDF text extraction failed: {extraction.get('error')}", file=sys.stderr)
+            return {"success": False, "error": f"Failed to extract text from PDF: {extraction.get('error')}"}
+        
+        text = extraction.get("text", "")
+        page_count = extraction.get("page_count", 0)
+        
+        print(f"DEBUG: Extracted {len(text)} characters from {page_count} pages", file=sys.stderr)
+        
+        if not text or not text.strip():
+            return {"success": False, "error": "No text found in PDF. The PDF might be scanned/image-based."}
+        
+        # Step 2: Create translated DOCX
+        result = create_simple_translated_docx(text, output_path, source_lang, target_lang)
+        
+        if result["success"]:
+            result["page_count"] = page_count
+            result["original_chars"] = len(text)
+            print(f"DEBUG: PDF translation complete. Output: {output_path}", file=sys.stderr)
+        
         return result
         
     else:
