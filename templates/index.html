@@ -607,7 +607,17 @@
                     <div>
                         <strong>Preserve File Format (Download)</strong>
                         <div style="font-size: 0.85rem; color: var(--text-secondary);">
-                            Returns a translated DOCX file with original layout (Best for PDF/DOCX)
+                            Returns a translated DOCX file with formatting
+                        </div>
+                    </div>
+                </label>
+
+                <label class="checkbox-group" style="margin-top: 1rem;" id="pdfLayoutGroup">
+                    <input type="checkbox" id="preservePdfLayout">
+                    <div>
+                        <strong>🎯 Keep EXACT PDF Layout (Recommended for PDFs)</strong>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary);">
+                            Replaces text in-place - output looks identical to original PDF
                         </div>
                     </div>
                 </label>
@@ -804,13 +814,27 @@
             formData.append('target_lang', targetLang);
 
             const preserveFormat = document.getElementById('preserveCheck').checked;
+            const preservePdfLayout = document.getElementById('preservePdfLayout').checked;
+            const isPdf = selectedFile.name.toLowerCase().endsWith('.pdf');
 
             // If preserving format, we don't summarize (feature limitation for now)
-            // But we can still pass the param if backend supports it (currently backend ignores summarize for preservation)
             formData.append('summarize', document.getElementById('summarizeCheck').checked ? 'true' : 'false');
 
-            const endpoint = preserveFormat ? '/upload-document' : '/upload';
-            const loadingText = preserveFormat ? 'Translating and generating document...' : 'Extracting text and translating...';
+            // Determine endpoint based on options
+            let endpoint;
+            let loadingText;
+
+            if (preservePdfLayout && isPdf) {
+                // Use layout-preserving PDF translation
+                endpoint = '/translate-pdf-layout';
+                loadingText = 'Translating PDF with exact layout preservation...';
+            } else if (preserveFormat) {
+                endpoint = '/upload-document';
+                loadingText = 'Translating and generating document...';
+            } else {
+                endpoint = '/upload';
+                loadingText = 'Extracting text and translating...';
+            }
 
             showLoading(loadingText);
 
@@ -824,8 +848,24 @@
                 hideLoading();
 
                 if (data.success) {
-                    if (preserveFormat) {
-                        // Preview Mode
+                    if (preservePdfLayout && isPdf) {
+                        // PDF Layout Preservation Mode
+                        showResult({
+                            success: true,
+                            translated_text: `✅ PDF translated successfully with layout preserved!\n\nTranslated ${data.translated_count || 'all'} text blocks.\nOutput: ${data.file_type?.toUpperCase() || 'PDF'} file`,
+                            target_lang: targetLang,
+                            summary: null
+                        });
+
+                        // Setup Download Button
+                        const dlBtn = document.getElementById('downloadBtn');
+                        dlBtn.href = `${API_BASE}${data.download_url}`;
+                        dlBtn.classList.remove('hidden');
+                        dlBtn.innerHTML = `⬇️ Download Translated PDF (Same Layout)`;
+
+                        document.getElementById('translatedLabel').innerText = "🎯 Translation Complete";
+                    } else if (preserveFormat) {
+                        // DOCX Preview Mode
                         showResult({
                             success: true,
                             translated_text: data.preview_text,

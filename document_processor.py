@@ -486,7 +486,187 @@ def translate_document_file(file_path: str, output_path: str, source_lang: str, 
     else:
         return {"success": False, "error": "Unsupported file type for format preservation"}
 
+
+def translate_pdf_preserve_layout(file_path: str, output_path: str, source_lang: str, target_lang: str) -> dict:
+    """
+    Translate PDF while preserving the EXACT original layout.
+    Uses BATCH translation for speed - collects all text first, translates in batches.
+    
+    This creates a translated PDF (not DOCX) that looks like the original.
+    """
+    try:
+        import fitz  # PyMuPDF
+        from translator import translate_text
+        import requests
+        import os
+        
+        print(f"DEBUG: Starting layout-preserving PDF translation: {file_path}", file=sys.stderr)
+        
+        # Open the PDF
+        doc = fitz.open(file_path)
+        
+        # Ensure output is PDF
+        if not output_path.lower().endswith('.pdf'):
+            output_path = output_path.rsplit('.', 1)[0] + '.pdf'
+        
+        # Step 1: Collect all text spans with their positions
+        print(f"DEBUG: Collecting text from {len(doc)} pages...", file=sys.stderr)
+        all_spans = []  # List of (page_num, span_info, original_text)
+        
+        for page_num, page in enumerate(doc):
+            blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+            
+            for block in blocks:
+                if block["type"] != 0:  # Skip non-text blocks
+                    continue
+                
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        original_text = span.get("text", "").strip()
+                        
+                        if original_text and len(original_text) >= 2:
+                            all_spans.append({
+                                "page": page_num,
+                                "bbox": span["bbox"],
+                                "size": span["size"],
+                                "font": span.get("font", "helv"),
+                                "color": span.get("color", 0),
+                                "original": original_text,
+                                "translated": None
+                            })
+        
+        print(f"DEBUG: Found {len(all_spans)} text spans to translate", file=sys.stderr)
+        
+        if not all_spans:
+            return {"success": False, "error": "No text found in PDF"}
+        
+        # Step 2: Batch translate all texts
+        # Azure Translator can handle multiple texts in one request
+        batch_size = 25  # Azure allows up to 100, but smaller batches are safer
+        translated_count = 0
+        
+        # Get Azure credentials
+        azure_key = os.environ.get("AZURE_TRANSLATOR_KEY", "")
+        azure_region = os.environ.get("AZURE_TRANSLATOR_REGION", "")
+        azure_endpoint = os.environ.get("AZURE_TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com")
+        
+        for i in range(0, len(all_spans), batch_size):
+            batch = all_spans[i:i+batch_size]
+            texts_to_translate = [{"text": s["original"]} for s in batch]
+            
+            print(f"DEBUG: Translating batch {i//batch_size + 1}/{(len(all_spans) + batch_size - 1)//batch_size} ({len(batch)} texts)", file=sys.stderr)
+            
+            # Make batch API call
+            try:
+                params = {"api-version": "3.0", "to": target_lang}
+                if source_lang and source_lang != 'auto':
+                    params["from"] = source_lang
+                
+                headers = {
+                    "Ocp-Apim-Subscription-Key": azure_key,
+                    "Ocp-Apim-Subscription-Region": azure_region,
+                    "Content-type": "application/json"
+                }
+                
+                response = requests.post(
+                    f"{azure_endpoint}/translate",
+                    params=params,
+                    headers=headers,
+                    json=texts_to_translate,
+                    timeout=60
+                )
+                
+                if response.status_code == 200:
+                    results = response.json()
+                    for j, result in enumerate(results):
+                        if result.get("translations"):
+                            batch[j]["translated"] = result["translations"][0]["text"]
+                            translated_count += 1
+                else:
+                    print(f"DEBUG: Batch translation failed: {response.status_code}", file=sys.stderr)
+                    # Fall back to individual translation for this batch
+                    for span_info in batch:
+                        result = translate_text(span_info["original"], source_lang, target_lang)
+                        if result["success"]:
+                            span_info["translated"] = result["translated_text"]
+                            translated_count += 1
+                            
+            except Exception as batch_error:
+                print(f"DEBUG: Batch error: {str(batch_error)}, falling back to individual", file=sys.stderr)
+                for span_info in batch:
+                    result = translate_text(span_info["original"], source_lang, target_lang)
+                    if result["success"]:
+                        span_info["translated"] = result["translated_text"]
+                        translated_count += 1
+        
+        # Step 3: Apply translations to PDF
+        print(f"DEBUG: Applying {translated_count} translations to PDF...", file=sys.stderr)
+        
+        for span_info in all_spans:
+            if not span_info["translated"]:
+                continue
+            
+            translated_text = span_info["translated"]
+            original_text = span_info["original"]
+            
+            # Skip if same
+            if translated_text == original_text:
+                continue
+            
+            page = doc[span_info["page"]]
+            bbox = fitz.Rect(span_info["bbox"])
+            font_size = span_info["size"]
+            
+            # Cover original text with white rectangle
+            page.draw_rect(bbox, color=(1, 1, 1), fill=(1, 1, 1))
+            
+            # Adjust font size if translated text is longer
+            text_length_ratio = len(translated_text) / max(len(original_text), 1)
+            adjusted_font_size = font_size
+            if text_length_ratio > 1.2:
+                adjusted_font_size = font_size / (text_length_ratio * 0.85)
+                adjusted_font_size = max(adjusted_font_size, 6)
+            
+            # Insert translated text
+            text_point = fitz.Point(bbox.x0, bbox.y1 - 2)
+            
+            try:
+                page.insert_text(
+                    text_point,
+                    translated_text,
+                    fontsize=adjusted_font_size,
+                    fontname="helv"
+                )
+            except:
+                # Fallback
+                page.insert_text(text_point, translated_text, fontsize=adjusted_font_size)
+        
+        # Save the translated PDF
+        doc.save(output_path)
+        doc.close()
+        
+        print(f"DEBUG: Layout-preserving translation complete. Translated {translated_count}/{len(all_spans)} spans", file=sys.stderr)
+        
+        return {
+            "success": True,
+            "output_path": output_path,
+            "translated_count": translated_count,
+            "total_blocks": len(all_spans),
+            "file_type": "pdf"
+        }
+        
+    except Exception as e:
+        print(f"DEBUG: Layout-preserving PDF translation failed: {str(e)}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": f"PDF layout translation failed: {str(e)}"
+        }
+
+
 # Quick test when run directly
 if __name__ == "__main__":
     print("Document Processor Module")
     print("Supported formats: PDF, DOCX, TXT")
+
