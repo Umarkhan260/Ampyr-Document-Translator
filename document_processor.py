@@ -9,9 +9,119 @@ import sys
 from typing import Optional
 
 
+def detect_columns(words, page_width, min_gap_ratio=0.05):
+    """
+    Detect column boundaries based on word positions.
+    Returns list of (left_bound, right_bound) tuples for each detected column.
+    """
+    if not words:
+        return [(0, page_width)]
+    
+    # Get all x0 (left edge) positions
+    x_positions = sorted(set(w['x0'] for w in words))
+    
+    if len(x_positions) < 2:
+        return [(0, page_width)]
+    
+    # Find gaps between words that indicate column boundaries
+    min_gap = page_width * min_gap_ratio  # Minimum gap to consider as column separator
+    
+    # Group words by their approximate x position to find column clusters
+    x0_values = [w['x0'] for w in words]
+    x1_values = [w['x1'] for w in words]
+    
+    # Find large horizontal gaps that indicate column separations
+    gaps = []
+    sorted_by_x = sorted(words, key=lambda w: w['x0'])
+    
+    for i in range(len(sorted_by_x) - 1):
+        current_right = sorted_by_x[i]['x1']
+        next_left = sorted_by_x[i + 1]['x0']
+        gap = next_left - current_right
+        
+        if gap > min_gap:
+            gaps.append((current_right, next_left, gap))
+    
+    # If no significant gaps found, treat as single column
+    if not gaps:
+        return [(min(x0_values), max(x1_values))]
+    
+    # Sort gaps by size and take the largest ones (likely column separators)
+    gaps.sort(key=lambda g: g[2], reverse=True)
+    
+    # Use top gaps to define column boundaries (limit to 3 columns max for most documents)
+    column_separators = sorted([g[0] + (g[1] - g[0]) / 2 for g in gaps[:2]])
+    
+    # Create column boundaries
+    columns = []
+    prev_boundary = 0
+    for sep in column_separators:
+        columns.append((prev_boundary, sep))
+        prev_boundary = sep
+    columns.append((prev_boundary, page_width))
+    
+    return columns
+
+
+def extract_text_by_columns(page, columns):
+    """
+    Extract text from page respecting column boundaries.
+    Reads each column top-to-bottom, then moves to next column.
+    """
+    words = page.extract_words(x_tolerance=3, y_tolerance=3)
+    
+    if not words:
+        return ""
+    
+    column_texts = []
+    
+    for col_left, col_right in columns:
+        # Get words in this column
+        col_words = [w for w in words if w['x0'] >= col_left - 5 and w['x1'] <= col_right + 5]
+        
+        if not col_words:
+            continue
+        
+        # Sort by y position (top to bottom), then x position (left to right)
+        col_words.sort(key=lambda w: (w['top'], w['x0']))
+        
+        # Group words into lines based on y position
+        lines = []
+        current_line = []
+        current_y = None
+        y_tolerance = 5
+        
+        for word in col_words:
+            if current_y is None or abs(word['top'] - current_y) <= y_tolerance:
+                current_line.append(word)
+                current_y = word['top'] if current_y is None else current_y
+            else:
+                if current_line:
+                    # Sort words in line by x position
+                    current_line.sort(key=lambda w: w['x0'])
+                    lines.append(' '.join(w['text'] for w in current_line))
+                current_line = [word]
+                current_y = word['top']
+        
+        # Don't forget the last line
+        if current_line:
+            current_line.sort(key=lambda w: w['x0'])
+            lines.append(' '.join(w['text'] for w in current_line))
+        
+        if lines:
+            column_texts.append('\n'.join(lines))
+    
+    return '\n\n---\n\n'.join(column_texts)
+
+
 def extract_text_from_pdf(file_path: str) -> dict:
     """
-    Extract text from a PDF file.
+    Extract text from a PDF file with intelligent multi-column detection.
+    
+    This improved version:
+    1. Detects multi-column layouts automatically
+    2. Reads each column top-to-bottom before moving to the next
+    3. Preserves reading order for complex documents like planning maps
     
     Args:
         file_path: Path to the PDF file
@@ -27,20 +137,38 @@ def extract_text_from_pdf(file_path: str) -> dict:
         
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
-                # Try to extract with layout preservation
-                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                page_width = page.width
+                page_height = page.height
                 
-                if page_text:
-                    # Cleanup: Fix hyphenation and broken lines
-                    # Remove multiple spaces
-                    clean_text = re.sub(r'[ ]{2,}', ' ', page_text)
-                    # Fix hyphenation at end of line (e.g. "exam-\nple" -> "example")
-                    clean_text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', clean_text)
-                    # Join lines that don't end in punctuation (simple heuristic)
-                    # clean_text = re.sub(r'(?<![.!?])\n', ' ', clean_text) 
-                    # (Disabled aggressive joining for now as it might merge headers/lists)
+                # Extract words with positions
+                words = page.extract_words(x_tolerance=3, y_tolerance=3)
+                
+                if words:
+                    # Detect columns based on word positions
+                    columns = detect_columns(words, page_width)
+                    num_columns = len(columns)
                     
-                    text_content.append(f"--- Page {page_num} ---\n{clean_text}")
+                    print(f"DEBUG: Page {page_num} - Detected {num_columns} column(s)", file=sys.stderr)
+                    
+                    if num_columns > 1:
+                        # Multi-column layout - extract by columns
+                        page_text = extract_text_by_columns(page, columns)
+                    else:
+                        # Single column - use standard extraction
+                        page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                    
+                    if page_text:
+                        # Cleanup
+                        clean_text = re.sub(r'[ ]{2,}', ' ', page_text)
+                        clean_text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', clean_text)
+                        text_content.append(f"--- Page {page_num} ---\n{clean_text}")
+                else:
+                    # No words found, try standard extraction
+                    page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                    if page_text:
+                        clean_text = re.sub(r'[ ]{2,}', ' ', page_text)
+                        clean_text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', clean_text)
+                        text_content.append(f"--- Page {page_num} ---\n{clean_text}")
         
         full_text = "\n\n".join(text_content)
         
@@ -320,7 +448,7 @@ def create_simple_translated_docx(text: str, output_path: str, source_lang: str,
     """
     try:
         from docx import Document
-        from docx.shared import Pt, Inches
+        from docx.shared import Pt, Inches, RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.enum.style import WD_STYLE_TYPE
         import re
@@ -335,7 +463,10 @@ def create_simple_translated_docx(text: str, output_path: str, source_lang: str,
             section.right_margin = Inches(1.25)
         
         # Clean up page markers like "--- Page 1 ---"
-        text = re.sub(r'---\s*Page\s*\d+\s*---\n*', '', text)
+        text = re.sub(r'---\s*Page\s*\d+\s*---\n*', '\n\n[PAGE_BREAK]\n\n', text)
+        
+        # Replace column separators with section marker
+        text = re.sub(r'\n*---\n*', '\n\n[SECTION_BREAK]\n\n', text)
         
         # Split by double newlines to paragraphs
         paragraphs = text.split('\n\n')
@@ -347,6 +478,21 @@ def create_simple_translated_docx(text: str, output_path: str, source_lang: str,
         for i, para in enumerate(paragraphs):
             para = para.strip()
             if not para:
+                continue
+            
+            # Handle special markers
+            if para == '[PAGE_BREAK]':
+                # Add page break
+                doc.add_page_break()
+                continue
+            elif para == '[SECTION_BREAK]':
+                # Add a horizontal rule / section separator
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = p.add_run('─' * 50)
+                run.font.color.rgb = RGBColor(150, 150, 150)
+                p.paragraph_format.space_before = Pt(12)
+                p.paragraph_format.space_after = Pt(12)
                 continue
             
             # Translate the paragraph
