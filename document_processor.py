@@ -194,6 +194,7 @@ def extract_text_from_pdf(file_path: str) -> dict:
 def ocr_pdf_with_vision(file_path: str) -> dict:
     """
     Extract text from PDF using OCR (Azure OpenAI Vision) via PyMuPDF rendering.
+    Note: This feature requires PyMuPDF which is not available on Render free tier.
     """
     try:
         import fitz  # PyMuPDF
@@ -229,6 +230,14 @@ def ocr_pdf_with_vision(file_path: str) -> dict:
             "error": None
         }
         
+    except ImportError:
+        # PyMuPDF not available (e.g., on Render deployment)
+        print(f"DEBUG: PyMuPDF not available, OCR disabled", file=sys.stderr)
+        return {
+            "success": False,
+            "text": None,
+            "error": "OCR feature not available on this deployment (PyMuPDF not installed)"
+        }
     except Exception as e:
         print(f"DEBUG: OCR failed: {str(e)}", file=sys.stderr)
         return {"success": False, "text": None, "error": f"OCR failed: {str(e)}"}
@@ -573,6 +582,7 @@ def create_simple_translated_docx(text: str, output_path: str, source_lang: str,
 def convert_pdf_to_docx(pdf_path: str, docx_path: str) -> dict:
     """
     Convert PDF to DOCX using pdf2docx.
+    Note: This feature requires pdf2docx which is not available on Render free tier.
     """
     try:
         from pdf2docx import Converter
@@ -582,6 +592,8 @@ def convert_pdf_to_docx(pdf_path: str, docx_path: str) -> dict:
         cv.close()
         
         return {"success": True, "output_path": docx_path}
+    except ImportError:
+        return {"success": False, "error": "PDF to DOCX conversion not available (pdf2docx not installed)"}
     except Exception as e:
         return {"success": False, "error": f"PDF conversion failed: {str(e)}"}
 
