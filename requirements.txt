@@ -1,22 +1,9 @@
-# Azure AI Integration Dependencies
-
-# Azure OpenAI SDK
-openai>=1.0.0
-
-# Environment variable management
-python-dotenv>=1.0.0
-
-# HTTP client for REST API calls (Translator)
-requests>=2.31.0
-
-# Flask Web Framework
-flask>=3.0.0
-flask-cors>=4.0.0
-
-# Document Processing
-pdfplumber>=0.10.0
-python-docx>=1.0.0
-
-# File upload handling
-werkzeug>=3.0.0
-pdf2docx>=0.5.0
+﻿Flask==3.0.0
+Flask-CORS==4.0.0
+python-dotenv==1.0.0
+requests==2.31.0
+pdfplumber==0.10.3
+python-docx==1.1.0
+PyMuPDF==1.23.8
+pdf2docx==0.5.6
+gunicorn==21.2.0
