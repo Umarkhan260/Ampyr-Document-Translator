@@ -26,7 +26,7 @@ load_dotenv()
 # Import our modules
 from translator import translate_text, translate_long_text, get_supported_languages
 from openai_client import generate_ai_response, summarize_text
-from document_processor import extract_text, translate_document_file, translate_pdf_preserve_layout
+from document_processor import extract_text, translate_document_file
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -206,68 +206,6 @@ def upload_and_preserve():
                 "download_url": f"/download/{output_filename}",
                 "original_filename": filename,
                 "translated_count": result.get("translated_count", 0)
-            })
-        else:
-            print(f"DEBUG: Translation failed: {result.get('error')}", file=sys.stderr)
-            return jsonify({"success": False, "error": result["error"]}), 500
-            
-    except Exception as e:
-        print(f"DEBUG: Exception: {str(e)}", file=sys.stderr)
-        return jsonify({"success": False, "error": str(e)}), 500
-        
-    finally:
-        if os.path.exists(temp_input):
-            os.remove(temp_input)
-
-
-@app.route('/translate-pdf-layout', methods=['POST'])
-def translate_pdf_with_layout():
-    """
-    Translate PDF while preserving the EXACT original layout.
-    Returns a PDF file that looks like the original but with translated text.
-    """
-    print("DEBUG: /translate-pdf-layout endpoint called", file=sys.stderr)
-    
-    if 'file' not in request.files:
-        return jsonify({"success": False, "error": "No file provided"}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"success": False, "error": "No file selected"}), 400
-    
-    # Only accept PDF files for this endpoint
-    if not file.filename.lower().endswith('.pdf'):
-        return jsonify({"success": False, "error": "This endpoint only accepts PDF files"}), 400
-
-    target_lang = request.form.get('target_lang', 'en')
-    source_lang = request.form.get('source_lang', 'auto')
-    
-    print(f"DEBUG: PDF Layout Translation - Source: {source_lang}, Target: {target_lang}", file=sys.stderr)
-    
-    filename = secure_filename(file.filename)
-    import uuid
-    unique_id = str(uuid.uuid4())[:8]
-    temp_input = os.path.join(app.config['UPLOAD_FOLDER'], f"in_{unique_id}_{filename}")
-    output_filename = f"translated_{unique_id}_{os.path.splitext(filename)[0]}.pdf"
-    temp_output = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
-    
-    try:
-        file.save(temp_input)
-        print(f"DEBUG: Saved input PDF to: {temp_input}", file=sys.stderr)
-        
-        # Translate with layout preservation
-        result = translate_pdf_preserve_layout(temp_input, temp_output, source_lang, target_lang)
-        
-        print(f"DEBUG: Translation result: success={result.get('success')}, translated={result.get('translated_count')}", file=sys.stderr)
-        
-        if result["success"]:
-            return jsonify({
-                "success": True, 
-                "message": "PDF translated with layout preserved",
-                "download_url": f"/download/{output_filename}",
-                "original_filename": filename,
-                "translated_count": result.get("translated_count", 0),
-                "file_type": "pdf"
             })
         else:
             print(f"DEBUG: Translation failed: {result.get('error')}", file=sys.stderr)
