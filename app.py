@@ -415,6 +415,7 @@ def internal_error(e):
 
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
     print("\n" + "=" * 50)
     print("  Azure AI Document Translation API")
     print("=" * 50)
@@ -424,7 +425,7 @@ if __name__ == '__main__':
     print("  POST /translate  - Translate text")
     print("  POST /upload     - Upload & translate document")
     print("  POST /analyze    - Analyze document with AI")
-    print("\nStarting server on http://127.0.0.1:5000")
+    print(f"\nStarting server on http://0.0.0.0:{port}")
     print("=" * 50 + "\n")
     
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=port)

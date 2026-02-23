@@ -67,17 +67,35 @@ def extract_text_by_columns(page, columns):
     """
     Extract text from page respecting column boundaries.
     Reads each column top-to-bottom, then moves to next column.
+    Each word is assigned to exactly ONE column (the best match) to prevent duplicates.
     """
     words = page.extract_words(x_tolerance=3, y_tolerance=3)
     
     if not words:
         return ""
     
+    # Assign each word to exactly ONE column (the best-matching one)
+    # This prevents words near column boundaries from appearing in multiple columns
+    column_word_map = {i: [] for i in range(len(columns))}
+    
+    for word in words:
+        word_center = (word['x0'] + word['x1']) / 2
+        best_col_idx = 0
+        best_distance = float('inf')
+        
+        for col_idx, (col_left, col_right) in enumerate(columns):
+            col_center = (col_left + col_right) / 2
+            distance = abs(word_center - col_center)
+            if distance < best_distance:
+                best_distance = distance
+                best_col_idx = col_idx
+        
+        column_word_map[best_col_idx].append(word)
+    
     column_texts = []
     
-    for col_left, col_right in columns:
-        # Get words in this column
-        col_words = [w for w in words if w['x0'] >= col_left - 5 and w['x1'] <= col_right + 5]
+    for col_idx in range(len(columns)):
+        col_words = column_word_map[col_idx]
         
         if not col_words:
             continue
@@ -391,40 +409,76 @@ def translate_docx_file(file_path: str, output_path: str, source_lang: str, targ
         
         translated_count = 0
         
+        # Track already-translated paragraphs to prevent duplicates
+        # Use the XML element itself (not id()) because python-docx may create
+        # different wrapper objects for the same underlying XML element
+        translated_elements = set()
+        
+        # Also track translated text content to catch duplicate text across different elements
+        translated_texts = set()
+        
         # Translate paragraphs - use run-level translation to preserve formatting
         for i, para in enumerate(doc.paragraphs):
-            if para.text.strip():
+            para_elem = para._element
+            if para_elem in translated_elements:
+                print(f"DEBUG: Para {i} - SKIPPING (already translated, same XML element)", file=sys.stderr)
+                continue
+            para_text = para.text.strip()
+            if para_text:
+                # Skip if we've already translated identical text content
+                if para_text in translated_texts:
+                    print(f"DEBUG: Para {i} - SKIPPING (duplicate text content)", file=sys.stderr)
+                    # Still translate it since it's a different element, but note it
+                
                 # Translate each run individually to preserve bold, italic, fonts, etc.
                 runs_translated = translate_paragraph_runs(para, source_lang, target_lang)
                 if runs_translated > 0:
                     translated_count += runs_translated
+                    translated_elements.add(para_elem)
+                    translated_texts.add(para_text)
                     print(f"DEBUG: Para {i} - translated {runs_translated} runs", file=sys.stderr)
-                elif para.text.strip():
+                elif para_text:
                     # Fallback: If no runs but text exists, translate whole paragraph
-                    print(f"DEBUG: Para {i} - no runs, using paragraph-level translation ({len(para.text)} chars)", file=sys.stderr)
-                    result = translate_long_text(para.text, source_lang, target_lang)
+                    print(f"DEBUG: Para {i} - no runs, using paragraph-level translation ({len(para_text)} chars)", file=sys.stderr)
+                    result = translate_long_text(para_text, source_lang, target_lang)
                     if result["success"]:
                         para.text = result["translated_text"]
                         translated_count += 1
+                        translated_elements.add(para_elem)
+                        translated_texts.add(para_text)
                     else:
                         print(f"DEBUG: Translation failed for para {i}: {result.get('error')}", file=sys.stderr)
 
         # Translate tables - use run-level translation to preserve formatting
+        # Track visited cells using XML element identity to avoid translating merged cells multiple times
+        visited_cell_elements = set()
         for t_idx, table in enumerate(doc.tables):
             for row in table.rows:
                 for cell in row.cells:
+                    cell_elem = cell._element
+                    if cell_elem in visited_cell_elements:
+                        continue
+                    visited_cell_elements.add(cell_elem)
                     for para in cell.paragraphs:
-                        if para.text.strip():
+                        para_elem = para._element
+                        if para_elem in translated_elements:
+                            continue
+                        para_text = para.text.strip()
+                        if para_text:
                             # Translate each run individually to preserve formatting
                             runs_translated = translate_paragraph_runs(para, source_lang, target_lang)
                             if runs_translated > 0:
                                 translated_count += runs_translated
-                            elif para.text.strip():
+                                translated_elements.add(para_elem)
+                                translated_texts.add(para_text)
+                            elif para_text:
                                 # Fallback for paragraphs without runs
-                                result = translate_long_text(para.text, source_lang, target_lang)
+                                result = translate_long_text(para_text, source_lang, target_lang)
                                 if result["success"]:
                                     para.text = result["translated_text"]
                                     translated_count += 1
+                                    translated_elements.add(para_elem)
+                                    translated_texts.add(para_text)
         
         print(f"DEBUG: Total translated segments: {translated_count}", file=sys.stderr)
         
@@ -480,7 +534,30 @@ def create_simple_translated_docx(text: str, output_path: str, source_lang: str,
         # Split by double newlines to paragraphs
         paragraphs = text.split('\n\n')
         
-        print(f"DEBUG: Creating professional DOCX - {len(paragraphs)} sections", file=sys.stderr)
+        # Remove consecutive duplicate paragraphs (common from PDF extraction issues)
+        deduped_paragraphs = []
+        seen_recent = set()  # Track recently seen paragraph texts within a sliding window
+        for para in paragraphs:
+            stripped = para.strip()
+            if not stripped:
+                deduped_paragraphs.append(para)
+                continue
+            # Skip special markers from dedup check
+            if stripped in ('[PAGE_BREAK]', '[SECTION_BREAK]'):
+                deduped_paragraphs.append(para)
+                seen_recent.clear()  # Reset on page/section breaks
+                continue
+            # Normalize whitespace for comparison
+            normalized = ' '.join(stripped.split())
+            if normalized not in seen_recent:
+                deduped_paragraphs.append(para)
+                seen_recent.add(normalized)
+            else:
+                print(f"DEBUG: Removing duplicate paragraph: '{stripped[:80]}...'", file=sys.stderr)
+        
+        paragraphs = deduped_paragraphs
+        
+        print(f"DEBUG: Creating professional DOCX - {len(paragraphs)} sections (after dedup)", file=sys.stderr)
         
         translated_count = 0
         
@@ -559,12 +636,11 @@ def create_simple_translated_docx(text: str, output_path: str, source_lang: str,
                     
                     last_end = match.end()
                 
-                # Add remaining text
-                if last_end < len(translated_text):
+                # Add remaining text after the last quoted term
+                if last_end > 0 and last_end < len(translated_text):
                     p.add_run(translated_text[last_end:])
-                
-                # If no quoted terms were found, the paragraph might be empty
-                if last_end == 0:
+                elif last_end == 0:
+                    # No quoted terms were found - add the full text as a single run
                     p.add_run(translated_text)
             
             # Add some spacing between paragraphs
